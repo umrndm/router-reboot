@@ -17,13 +17,11 @@ import java.net.URLEncoder;
 import java.security.MessageDigest;
 
 /**
- * Talks to a TP-Link router (TL-WR840N family, "oid" firmware) and triggers
- * System Tools -> Reboot without needing the web UI.
+ * Restarts a TP-Link TL-WR840N (v5, fw 3.16 "oid" UI) like the web page's Reboot button.
  *
- * The firmware accepts the login as a cookie "Authorization=Basic base64(user:secret)"
- * where secret is either the plain password or its MD5 hex (depends on firmware build),
- * and takes the reboot as a POST to /cgi?7. Because builds differ, every combination is
- * tried and the one that works is remembered.
+ * Login is a cookie "Authorization=Basic base64(user:secret)", secret = plain password or its
+ * MD5 (build dependent). Reboot = POST /cgi?7 with an ACT_REBOOT body. Success is only reported
+ * when the router really stops answering afterwards, never from the HTTP reply alone.
  */
 final class RouterClient {
 
@@ -35,14 +33,11 @@ final class RouterClient {
         Result(int code, String detail) { this.code = code; this.detail = detail; }
     }
 
-    // Verified on the router itself (TL-WR840N v5, fw 0.9.1 3.16 Build 171030):
-    // the Reboot page runs $.act(ACT_OP, ACT_OP_REBOOT) with ACT_OP = 7 and
-    // ACT_OP_REBOOT = "ACT_REBOOT", i.e. POST /cgi?7 with this body.
-    private static final String[] BODIES = {
-            "[ACT_REBOOT#0,0,0,0,0,0#0,0,0,0,0,0]0,0\r\n"
-    };
-    private static final int AUTH_PLAIN = 0, AUTH_MD5 = 1;
-    // variant index = auth * BODIES.length + body
+    private static final String REBOOT_BODY = "[ACT_REBOOT#0,0,0,0,0,0#0,0,0,0,0,0]0,0\r\n";
+    // Harmless read used to check the login before rebooting.
+    private static final String PROBE_BODY = "[IGD_DEV_INFO#0,0,0,0,0,0#0,0,0,0,0,0]0,1\r\nupTime\r\n";
+
+    private static final int P_AUTH_OK = 0, P_AUTH_BAD = 1, P_NET = 2, P_UNKNOWN = 3;
 
     private RouterClient() {}
 
@@ -50,43 +45,59 @@ final class RouterClient {
 
     /** Blocking. Call from a worker thread. */
     static Result reboot(Context ctx, String host, String user, String pass) {
-        int total = 2 * BODIES.length;
-        int first = Store.variant(ctx);
-        int[] order = new int[total];
-        int n = 0;
-        if (first >= 0 && first < total) order[n++] = first;
-        for (int v = 0; v < total; v++) if (v != first) order[n++] = v;
-
-        boolean sawAuthFail = false;
-        String lastDetail = "no attempt made";
         StringBuilder log = new StringBuilder();
-
-        for (int pass2 = 0; pass2 < 2; pass2++) {          // 2nd pass = router busy / transient error
-            boolean transientProblem = false;
-            for (int i = 0; i < total; i++) {
-                int v = order[i];
-                Result r = attempt(ctx, host, user, pass, v / BODIES.length, v % BODIES.length);
-                log.append("v").append(v).append(": ").append(r.detail).append('\n');
-                if (r.code == OK) {
-                    Store.setVariant(ctx, v);
-                    Store.setDiag(ctx, log.toString());
-                    return r;
-                }
-                lastDetail = r.detail;
-                if (r.code == UNREACHABLE) {
-                    transientProblem = true;
-                    break;                                   // no point trying other variants
-                }
-                if (r.code == BAD_AUTH) sawAuthFail = true;
-                else transientProblem = true;
-            }
-            if (!transientProblem) break;
-            sleep(2500);
-        }
+        Result res = doReboot(ctx, host, user, pass, log);
         Store.setDiag(ctx, log.toString());
-        if (lastDetail.startsWith("unreachable")) return new Result(UNREACHABLE, lastDetail);
-        if (sawAuthFail && !log.toString().contains("[error]")) return new Result(BAD_AUTH, lastDetail);
-        return new Result(FAILED, lastDetail);
+        return res;
+    }
+
+    private static Result doReboot(Context ctx, String host, String user, String pass, StringBuilder log) {
+        String[] secrets;
+        try {
+            secrets = new String[]{pass, md5(pass)};
+        } catch (Exception e) {
+            return new Result(FAILED, "md5 unavailable");
+        }
+        int first = Store.variant(ctx);
+        int[] order = first == 1 ? new int[]{1, 0} : new int[]{0, 1};
+
+        // 1) Check which login the router accepts (harmless read).
+        int good = -1;
+        boolean unknownProbe = false;
+        for (int attempt = 0; attempt < 2 && good < 0; attempt++) {
+            boolean net = false;
+            for (int a : order) {
+                String[] out = new String[1];
+                int p = probe(ctx, host, user, secrets[a], out);
+                log.append("login check ").append(a == 0 ? "plain" : "md5").append(": ").append(out[0]).append('\n');
+                if (p == P_AUTH_OK) { good = a; break; }
+                if (p == P_NET) { net = true; break; }
+                if (p == P_UNKNOWN) unknownProbe = true;
+            }
+            if (good >= 0) break;
+            if (net) {
+                if (attempt == 0) { sleep(2500); continue; }
+                return new Result(UNREACHABLE, "router not reachable");
+            }
+            break;
+        }
+
+        // 2) Reboot. With a verified login use it; otherwise try both blindly.
+        int[] tryList = good >= 0 ? new int[]{good} : order;
+        Result last = new Result(BAD_AUTH, "login not accepted");
+        for (int a : tryList) {
+            Result r = sendReboot(ctx, host, user, secrets[a], log, a == 0 ? "plain" : "md5");
+            if (r.code == OK) {
+                Store.setVariant(ctx, a);
+                return r;
+            }
+            last = r;
+            if (r.code == UNREACHABLE) return r;
+        }
+        if (good < 0 && last.code == FAILED && !unknownProbe) {
+            return new Result(BAD_AUTH, last.detail);
+        }
+        return last;
     }
 
     /** Reads the router's front page (no login, no reboot). */
@@ -108,88 +119,109 @@ final class RouterClient {
 
     // ------------------------------------------------------------------ internals
 
-    private static Result attempt(Context ctx, String host, String user, String pass,
-                                  int auth, int bodyIdx) {
+    private static int probe(Context ctx, String host, String user, String secret, String[] out) {
         HttpURLConnection c = null;
-        boolean sent = false;
         try {
-            String secret = auth == AUTH_MD5 ? md5(pass) : pass;
-            String basic = "Basic " + Base64.encodeToString(
-                    (user + ":" + secret).getBytes("UTF-8"), Base64.NO_WRAP);
-            String cookie = "Authorization=" + URLEncoder.encode(basic, "UTF-8").replace("+", "%20");
-
-            c = open(ctx, new URL("http://" + host + "/cgi?7"));
-            c.setConnectTimeout(5000);
-            c.setReadTimeout(9000);
-            c.setRequestMethod("POST");
-            c.setDoOutput(true);
-            c.setUseCaches(false);
-            c.setInstanceFollowRedirects(false);
-            c.setRequestProperty("Content-Type", "text/plain");
-            c.setRequestProperty("Referer", "http://" + host + "/mainFrame.htm");
-            c.setRequestProperty("Cookie", cookie);
-            c.setRequestProperty("Connection", "close");
-            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) RouterReboot");
-
-            byte[] body = BODIES[bodyIdx].getBytes("UTF-8");
-            c.setFixedLengthStreamingMode(body.length);
-            OutputStream os = c.getOutputStream();
-            os.write(body);
-            os.flush();
-            os.close();
-            sent = true;
-
+            c = post(ctx, host, "/cgi?1", user, secret, PROBE_BODY);
             int code = c.getResponseCode();
             String text = read(code >= 400 ? c.getErrorStream() : c.getInputStream());
-            String snippet = text.replace('\r', ' ').replace('\n', ' ');
-            if (snippet.length() > 80) snippet = snippet.substring(0, 80);
-
-            if (code == 401 || code == 403) return new Result(BAD_AUTH, "HTTP " + code + " (login refused)");
-            if (text.contains("[error]0")) {
-                return new Result(OK, "HTTP " + code + " " + snippet);
-            }
-            if (text.contains("[error]")) {
-                return new Result(FAILED, "HTTP " + code + " " + snippet);
-            }
-            if (text.toLowerCase().contains("<html") || code == 302 || code == 301) {
-                return new Result(BAD_AUTH, "HTTP " + code + " (got a web page, not an API reply)");
-            }
-            return new Result(FAILED, "HTTP " + code + " " + snippet);
-
+            out[0] = "HTTP " + code + " " + shorten(text);
+            if (code == 401 || code == 403) return P_AUTH_BAD;
+            if (text.contains("upTime")) return P_AUTH_OK;
+            if (text.toLowerCase().contains("<html")) return P_AUTH_BAD;
+            return P_UNKNOWN;
         } catch (IOException e) {
-            if (sent) {
-                // Request was delivered and the connection died: typical of a router that is
-                // rebooting. Make sure it really went down before reporting success.
-                if (waitUntilDown(ctx, host)) {
-                    return new Result(OK, "connection dropped after send; router went offline");
-                }
-                return new Result(FAILED, "connection dropped but router still online");
-            }
-            return new Result(UNREACHABLE, "unreachable: " + e.getClass().getSimpleName());
+            out[0] = "network: " + e.getClass().getSimpleName();
+            return P_NET;
         } catch (Exception e) {
-            return new Result(FAILED, "error: " + e.getClass().getSimpleName());
+            out[0] = "error: " + e.getClass().getSimpleName();
+            return P_UNKNOWN;
         } finally {
             if (c != null) c.disconnect();
         }
     }
 
-    /** True if the router stops answering within ~12 seconds. */
+    private static Result sendReboot(Context ctx, String host, String user, String secret,
+                                     StringBuilder log, String label) {
+        HttpURLConnection c = null;
+        String reply;
+        try {
+            c = post(ctx, host, "/cgi?7", user, secret, REBOOT_BODY);
+            int code = c.getResponseCode();
+            String text = read(code >= 400 ? c.getErrorStream() : c.getInputStream());
+            reply = "HTTP " + code + " " + shorten(text);
+            if (code == 401 || code == 403) {
+                log.append("reboot ").append(label).append(": ").append(reply).append('\n');
+                return new Result(BAD_AUTH, reply);
+            }
+        } catch (IOException e) {
+            // Delivered request, then the connection died: typical while a router reboots.
+            reply = "connection closed: " + e.getClass().getSimpleName();
+        } catch (Exception e) {
+            log.append("reboot ").append(label).append(": error ").append(e.getClass().getSimpleName()).append('\n');
+            return new Result(FAILED, "error: " + e.getClass().getSimpleName());
+        } finally {
+            if (c != null) c.disconnect();
+        }
+
+        boolean down = waitUntilDown(ctx, host);
+        log.append("reboot ").append(label).append(": ").append(reply)
+                .append(down ? " -> router went offline" : " -> router STAYED ONLINE").append('\n');
+        if (down) return new Result(OK, reply);
+        return new Result(FAILED, "router answered but did not restart: " + reply);
+    }
+
+    /** True once the router fails to answer twice in a row within ~25 seconds. */
     private static boolean waitUntilDown(Context ctx, String host) {
-        for (int i = 0; i < 8; i++) {
+        int fails = 0;
+        for (int i = 0; i < 25; i++) {
             HttpURLConnection c = null;
+            boolean up;
             try {
                 c = open(ctx, new URL("http://" + host + "/"));
                 c.setConnectTimeout(1500);
                 c.setReadTimeout(1500);
                 c.getResponseCode();
+                up = true;
             } catch (Exception e) {
-                return true;
+                up = false;
             } finally {
                 if (c != null) c.disconnect();
             }
-            sleep(1500);
+            if (up) fails = 0; else if (++fails >= 2) return true;
+            sleep(700);
         }
         return false;
+    }
+
+    private static HttpURLConnection post(Context ctx, String host, String path, String user,
+                                          String secret, String bodyText) throws Exception {
+        String basic = "Basic " + Base64.encodeToString((user + ":" + secret).getBytes("UTF-8"), Base64.NO_WRAP);
+        String cookie = "Authorization=" + URLEncoder.encode(basic, "UTF-8").replace("+", "%20");
+        HttpURLConnection c = open(ctx, new URL("http://" + host + path));
+        c.setConnectTimeout(5000);
+        c.setReadTimeout(9000);
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setUseCaches(false);
+        c.setInstanceFollowRedirects(false);
+        c.setRequestProperty("Content-Type", "text/plain");
+        c.setRequestProperty("Referer", "http://" + host + "/mainFrame.htm");
+        c.setRequestProperty("Cookie", cookie);
+        c.setRequestProperty("Connection", "close");
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) RouterReboot");
+        byte[] body = bodyText.getBytes("UTF-8");
+        c.setFixedLengthStreamingMode(body.length);
+        OutputStream os = c.getOutputStream();
+        os.write(body);
+        os.flush();
+        os.close();
+        return c;
+    }
+
+    private static String shorten(String s) {
+        String t = s.replace('\r', ' ').replace('\n', ' ').trim();
+        return t.length() > 90 ? t.substring(0, 90) : t;
     }
 
     private static HttpURLConnection open(Context ctx, URL url) throws IOException {
