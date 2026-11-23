@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Router Reboot</title>
+<style>
+*{-webkit-box-sizing:border-box;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:#0B1020;color:#E5E7EB;font-family:sans-serif;-webkit-text-size-adjust:100%}
+body{min-height:100%;background:-webkit-linear-gradient(top,#0B1020,#111A33);background:linear-gradient(180deg,#0B1020,#111A33);padding:28px 20px 40px}
+.wrap{max-width:420px;margin:0 auto}
+.logo{width:92px;height:92px;margin:6px auto 14px;border-radius:26px;background:-webkit-linear-gradient(top,#1E293B,#0F172A);background:linear-gradient(180deg,#1E293B,#0F172A);-webkit-box-shadow:0 0 28px rgba(45,212,191,.35);box-shadow:0 0 28px rgba(45,212,191,.35);text-align:center;padding-top:19px}
+h1{margin:0;text-align:center;font-size:22px;color:#fff;letter-spacing:.3px}
+.sub{text-align:center;color:#94A3B8;font-size:13px;margin:6px 0 22px}
+.card{background:#141C36;border:1px solid #223054;border-radius:18px;padding:18px}
+label{display:block;font-size:12px;color:#94A3B8;margin:12px 0 6px}
+label:first-child{margin-top:0}
+input{width:100%;height:46px;border-radius:12px;border:1px solid #2A3963;background:#0E1530;color:#fff;padding:0 14px;font-size:16px;outline:none}
+input:focus{border-color:#2DD4BF}
+.btn{display:block;width:100%;height:50px;line-height:50px;border-radius:14px;border:0;text-align:center;font-size:16px;font-weight:bold;margin-top:18px}
+.primary{background:-webkit-linear-gradient(left,#2DD4BF,#22C55E);background:linear-gradient(90deg,#2DD4BF,#22C55E);color:#06231F}
+.ghost{background:transparent;border:1px solid #2A3963;color:#CBD5E1;margin-top:10px}
+.btn:active{opacity:.8}
+#msg{display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;background:#3B1D24;border:1px solid #7F1D2D;color:#FCA5A5;font-size:13px}
+#status{min-height:18px;margin-top:12px;font-size:13px;text-align:center}
+.ok{color:#5EEAD4}.bad{color:#FCA5A5}
+.hint{color:#64748B;font-size:12px;text-align:center;margin-top:18px;line-height:1.5}
+details{margin-top:18px;color:#64748B;font-size:12px}
+pre{white-space:pre-wrap;word-wrap:break-word;background:#0E1530;border-radius:10px;padding:10px;color:#94A3B8}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">
+    <svg width="54" height="54" viewBox="0 0 54 54">
+      <path d="M17 13 A17 17 0 1 0 37 13" fill="none" stroke="#2DD4BF" stroke-width="5" stroke-linecap="round"/>
+      <line x1="27" y1="5" x2="27" y2="25" stroke="#2DD4BF" stroke-width="5" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <h1>Router Reboot</h1>
+  <div class="sub">One tap on the app icon restarts your router</div>
+
+  <div id="msg"></div>
+
+  <div class="card">
+    <label>Router address</label>
+    <input id="host" type="text" value="192.168.0.1" autocapitalize="off" autocorrect="off">
+    <label>Username</label>
+    <input id="user" type="text" autocapitalize="off" autocorrect="off">
+    <label>Password</label>
+    <input id="pass" type="password" placeholder="">
+    <div class="btn primary" id="save">Save</div>
+    <div class="btn ghost" id="check">Check router is reachable</div>
+    <div id="status"></div>
+  </div>
+
+  <div class="hint">After saving, tapping the app icon asks "Restart router?", then restarts it in the background and shows "Router Restarted". Works on your home Wi-Fi only.</div>
+  <details id="dg" style="display:none"><summary>Last attempt details</summary><pre id="diag"></pre></details>
+</div>
+
+<script>
+function $(i){return document.getElementById(i)}
+function setStatus(t,ok){var s=$('status');s.className=ok?'ok':'bad';s.innerHTML='';s.appendChild(document.createTextNode(t))}
+function onSaved(ok,t){if(!ok)setStatus(t,false)}
+function onCheck(ok,t){setStatus(t,ok)}
+try{
+  var c=JSON.parse(Android.getConfig());
+  $('host').value=c.host||'192.168.0.1';
+  $('user').value=c.user||'';
+  if(c.hasPass)$('pass').placeholder='Saved (leave blank to keep)';
+  if(c.msg){var m=$('msg');m.style.display='block';m.appendChild(document.createTextNode(c.msg))}
+  if(c.diag){$('dg').style.display='block';$('diag').appendChild(document.createTextNode(c.diag))}
+}catch(e){}
+$('save').onclick=function(){setStatus('Saving...',true);Android.save($('host').value,$('user').value,$('pass').value)};
+$('check').onclick=function(){setStatus('Checking...',true);Android.check($('host').value)};
+</script>
+</body>
+</html>
