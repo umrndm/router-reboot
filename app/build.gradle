@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.zeeshan.routerreboot'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'com.zeeshan.routerreboot'
+        minSdk 14
+        targetSdk 33
+        versionCode 1
+        versionName '1.0'
+    }
+
+    signingConfigs {
+        release {
+            // Personal sideload key (decoded from release.jks.b64 by the workflow) so every
+            // build has the same signature and new versions install over old ones.
+            storeFile file('release.jks')
+            storePassword 'routerreboot'
+            keyAlias 'routerreboot'
+            keyPassword 'routerreboot'
+            enableV1Signing true   // required for Android 4.x
+            enableV2Signing true
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
